@@ -40,7 +40,7 @@ pip install -r requirements.txt
 
 ```bash
 # Continuous control (MuJoCo / DM Control)
-python intentional_ac.py --env_name HalfCheetah-v4 --seed 0 --debug
+python intentional_ac.py --env_name Ant-v4 --seed 0 --debug
 
 # MinAtar
 python intentional_q_minatar.py --env_name MinAtar/Breakout-v1 --seed 0 --debug
@@ -51,7 +51,7 @@ python intentional_q_atari.py --env_name BreakoutNoFrameskip-v4 --seed 0 --debug
 
 Add `--render` to visualise the agent live. Add `--debug` to print episodic returns during training.
 
-### Key hyperparameters
+### Key meta-parameters
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -59,18 +59,18 @@ Add `--render` to visualise the agent live. Add `--debug` to print episodic retu
 | `--eta_policy` | 0.05 | Target per-step change in log π (≈5% policy shift per update) |
 | `--lamda` | 0.8 | Eligibility trace decay λ |
 | `--gamma` | 0.99 | Discount factor |
-| `--entropy_coeff` | 0.01 | Entropy bonus coefficient (AC only) |
-| `--total_steps` | 5 000 000 | Total environment steps |
+
+All experiments in the paper use default meta-parameters.
 
 ### Reproducing paper runs
 
 ```bash
 for seed in $(seq 0 29); do
-  python intentional_ac.py --env_name HalfCheetah-v4 --seed "$seed"
+  python intentional_ac.py --env_name Ant-v4 --seed "$seed"
 done
 
 python plot.py \
-  --data_dir data_intentional_ac_HalfCheetah-v4_gamma0.99_lamda0.8_entropy_coeff0.01_eta_policy0.05_eta_value0.5 \
+  --data_dir data_intentional_ac_Ant-v4_gamma0.99_lamda0.8_entropy_coeff0.01_eta_policy0.05_eta_value0.5 \
   --int_space 50000 \
   --total_steps 5000000
 ```

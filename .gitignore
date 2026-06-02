@@ -18,13 +18,6 @@ ENV/
 data_intentional_*/
 *.pkl
 
-# Plots and figures (keep source, not rendered outputs)
-*.pdf
-*.png
-*.svg
-figures/
-plots/
-
 # ── Jupyter ────────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb

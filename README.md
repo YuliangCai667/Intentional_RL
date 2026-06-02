@@ -3,8 +3,8 @@
 Official implementation of the ICML 2026 paper:
 
 > **Intentional Updates for Streaming Reinforcement Learning**
-> Arsalan Sharifnassab, Mohamed Elsayed, Kris De Asis, A. Rupam Mahmood, Richard S. Sutton
-> [[Paper]](https://proceedings.mlr.press/v306) · [[Code]](https://github.com/sharifnassab/Intentional_RL)
+> A. Sharifnassab, M. Elsayed, K. De Asis, A. R. Mahmood, R. S. Sutton
+> [[Paper]](https://arxiv.org/pdf/2604.19033) · [[Code]](https://github.com/sharifnassab/Intentional_RL)
 
 ---
 

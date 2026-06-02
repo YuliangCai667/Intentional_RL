@@ -6,7 +6,6 @@ class IntentionalOptimizer(torch.optim.Optimizer):
     
     Args:
         params: Model parameters
-        lr: Learning rate
         gamma: Discount factor
         lamda: Eligibility trace decay
         eta: Step size coefficient (default: 0.5 for value, use 0.05 for policy)
@@ -19,10 +18,10 @@ class IntentionalOptimizer(torch.optim.Optimizer):
         use_rmsprop: If True, use RMSProp normalization. If False, no gradient normalization.
         use_sigma: If True, use sigma normalization in step size. If False, step_size = eta / ||z||.
     """
-    def __init__(self, params, lr=1.0, gamma=0.99, lamda=0.0, eta=0.5, beta2=0.999, 
+    def __init__(self, params, gamma=0.99, lamda=0.0, eta=0.5, beta2=0.999, 
                  normalize_delta=False, clip_mult=20.0, beta_clip=0.9998, beta_norm=0.9998,
                  use_adaptive_clip=True, use_rmsprop=True, use_sigma=True):
-        defaults = dict(lr=lr, gamma=gamma, lamda=lamda, beta2=beta2)
+        defaults = dict(gamma=gamma, lamda=lamda, beta2=beta2)
         super().__init__(params, defaults)
 
         self.gamma = gamma
@@ -43,7 +42,7 @@ class IntentionalOptimizer(torch.optim.Optimizer):
         self.clip_mult = clip_mult   # C in the algorithm
         self.beta_clip = beta_clip    # β_clip in the algorithm
         self.clip_t = 0
-        self.clip_ema_sq = 1.0       # δ̂_t in the algorithm
+        self.clip_ema_sq = 0.0       # δ̂_t in the algorithm
         
         # normalization state (only used if normalize_delta=True)
         self.beta_norm = beta_norm    # β_norm in the algorithm
@@ -131,29 +130,28 @@ class IntentionalOptimizer(torch.optim.Optimizer):
                 state = self.state[p]
                 e = state["eligibility_trace"]
                 
-                # Direct update without self.safe_delta
-                p.data.add_(e / state["rmsprop_v_hat"], alpha=-self.safe_delta * step_size)
+                p.data.add_(e / state["rmsprop_v_hat"], alpha=self.safe_delta * step_size)
                 
                 if reset:
                     e.zero_()
 
 
-def IntentionalOptimizerPolicy(params, lr=1.0, gamma=0.99, lamda=0.0, eta=0.05, beta2=0.999,
+def IntentionalOptimizerPolicy(params, gamma=0.99, lamda=0.0, eta=0.05, beta2=0.999,
               clip_mult=20.0, beta_clip=0.9998, beta_norm=0.9998, normalize_delta=True,
               use_adaptive_clip=True, use_rmsprop=True, use_sigma=True):
     """Intentional optimizer configured for policy networks (with delta normalization)."""
-    return IntentionalOptimizer(params, lr=lr, gamma=gamma, lamda=lamda, eta=eta, 
+    return IntentionalOptimizer(params, gamma=gamma, lamda=lamda, eta=eta, 
                beta2=beta2, normalize_delta=normalize_delta,
                clip_mult=clip_mult, beta_clip=beta_clip, beta_norm=beta_norm,
                use_adaptive_clip=use_adaptive_clip, use_rmsprop=use_rmsprop,
                use_sigma=use_sigma)
 
 
-def IntentionalOptimizerValue(params, lr=1.0, gamma=0.99, lamda=0.0, eta=0.5, beta2=0.999,
+def IntentionalOptimizerValue(params, gamma=0.99, lamda=0.0, eta=0.5, beta2=0.999,
              clip_mult=20.0, beta_clip=0.9998, normalize_delta=False,
              use_adaptive_clip=True, use_rmsprop=True, use_sigma=True):
     """Intentional optimizer configured for value networks (without delta normalization)."""
-    return IntentionalOptimizer(params, lr=lr, gamma=gamma, lamda=lamda, eta=eta, 
+    return IntentionalOptimizer(params, gamma=gamma, lamda=lamda, eta=eta, 
                beta2=beta2, normalize_delta=normalize_delta,
                clip_mult=clip_mult, beta_clip=beta_clip,
                use_adaptive_clip=use_adaptive_clip, use_rmsprop=use_rmsprop,

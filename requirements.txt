@@ -1,0 +1,27 @@
+# Core numerical / ML dependencies
+numpy>=1.24.0
+torch>=2.1.0
+
+# Gymnasium environments and wrappers
+# Gymnasium >=1.0 is needed for wrappers used in this repo, e.g. FrameStackObservation.
+gymnasium[atari,mujoco,accept-rom-license]>=1.0.0
+
+# MuJoCo continuous-control backend
+mujoco>=3.1.0
+
+# MinAtar environments, e.g. MinAtar/Breakout-v1
+MinAtar>=1.0.13
+
+# Atari / ALE support
+ale-py>=0.8.1
+AutoROM[accept-rom-license]>=0.6.1
+
+# Atari preprocessing utilities used by stable_baselines3.common.atari_wrappers
+stable-baselines3>=2.2.0
+opencv-python>=4.8.0
+
+# Plotting
+matplotlib>=3.7.0
+
+# Optional experiment tracking; only needed if you add/use a --track flag
+wandb>=0.16.0

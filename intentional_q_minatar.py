@@ -4,6 +4,8 @@ import numpy as np
 import torch.nn as nn
 
 import gymnasium as gym
+from minatar.gym import register_envs
+register_envs()
 from optimizer import IntentionalOptimizerValue as Optimizer
 import torch.nn.functional as F
 from normalization_wrappers import NormalizeObservation, ScaleReward
@@ -27,7 +29,7 @@ def initialize_weights(m):
         m.bias.data.fill_(0.0)
 
 class IntentionalQ(nn.Module):
-    def __init__(self, n_channels=4, n_actions=3, hidden_size=128, lr=1.0, epsilon_target=0.01, epsilon_start=1.0, exploration_fraction=0.1, total_steps=1_000_000, gamma=0.99, lamda=0.8, eta_value=0.5):
+    def __init__(self, n_channels=4, n_actions=3, hidden_size=128, epsilon_target=0.01, epsilon_start=1.0, exploration_fraction=0.1, total_steps=1_000_000, gamma=0.99, lamda=0.8, eta_value=0.5):
         super(IntentionalQ, self).__init__()
         self.n_actions = n_actions
         self.gamma = gamma
@@ -48,7 +50,7 @@ class IntentionalQ(nn.Module):
             nn.Linear(hidden_size, n_actions)
         )
         self.apply(initialize_weights)
-        self.optimizer = Optimizer(list(self.parameters()), lr=lr, gamma=gamma, lamda=lamda, eta=eta_value)
+        self.optimizer = Optimizer(list(self.parameters()), gamma=gamma, lamda=lamda, eta=eta_value)
 
     def q(self, x):
         x = torch.moveaxis(x, -1, 0)
@@ -69,7 +71,7 @@ class IntentionalQ(nn.Module):
                 return random_action, True
         else:
             q_values = self.q(s)
-            return torch.argmax(q_values, dim=-1), False
+            return torch.argmax(q_values, dim=-1).item(), False
 
     def update_params(self, s, a, r, s_prime, done, is_nongreedy):
         done_mask = 0 if done else 1
@@ -82,18 +84,34 @@ class IntentionalQ(nn.Module):
         td_target = r + self.gamma * max_q_s_prime_a_prime * done_mask
         delta = td_target - q_sa
 
-        q_output = -q_sa
         self.optimizer.zero_grad()
-        q_output.backward()
+        q_sa.backward()
         self.optimizer.step(delta.item(), reset=(done or is_nongreedy))
 
-def main(env_name, seed, lr, gamma, lamda, total_steps, epsilon_target, epsilon_start, exploration_fraction, eta_value, debug, render=False):
+def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_start, exploration_fraction, eta_value, debug, render=False, track=False, wandb_project="intentional-updates"):
     torch.manual_seed(seed); np.random.seed(seed)
     env = gym.make(env_name, render_mode='human') if render else gym.make(env_name)
     env = gym.wrappers.RecordEpisodeStatistics(env)
     env = NormalizeObservation(env)
     env = ScaleReward(env, gamma=gamma)
-    agent = IntentionalQ(n_channels=env.observation_space.shape[-1], n_actions=env.action_space.n, lr=lr, gamma=gamma, lamda=lamda, epsilon_target=epsilon_target, epsilon_start=epsilon_start, exploration_fraction=exploration_fraction, total_steps=total_steps, eta_value=eta_value)
+    agent = IntentionalQ(n_channels=env.observation_space.shape[-1], n_actions=env.action_space.n, gamma=gamma, lamda=lamda, epsilon_target=epsilon_target, epsilon_start=epsilon_start, exploration_fraction=exploration_fraction, total_steps=total_steps, eta_value=eta_value)
+    if track:
+        import wandb
+        wandb.init(
+            project=wandb_project,
+            config={
+                "env_name": env_name,
+                "seed": seed,
+                "gamma": gamma,
+                "lamda": lamda,
+                "total_steps": total_steps,
+                "eta_value": eta_value,
+                "epsilon_target": epsilon_target,
+                "epsilon_start": epsilon_start,
+                "exploration_fraction": exploration_fraction,
+            },
+            name=f"{env_name}-seed{seed}",
+        )
     if debug:
         print("seed: {}".format(seed), "env: {}".format(env.spec.id))
     returns, term_time_steps = [], []
@@ -105,24 +123,34 @@ def main(env_name, seed, lr, gamma, lamda, total_steps, epsilon_target, epsilon_
         agent.update_params(s, a, r, s_prime, terminated or truncated, is_nongreedy)
         s = s_prime
         if terminated or truncated:
+            episode_return = info["episode"]["r"]
+            episode_length = info["episode"].get("l", None)
             if debug:
-                print("Episodic Return: {}, Time Step {}, Episode Number {}, Epsilon {}".format(info['episode']['r'][0], t, episode_num, agent.epsilon))
-            returns.append(info['episode']['r'][0])
+                print("Episodic Return: {}, Time Step {}, Episode Number {}, Epsilon {}".format(episode_return, t, episode_num, agent.epsilon))
+            returns.append(episode_return)
             term_time_steps.append(t)
             s, _ = env.reset()
             episode_num += 1
+            if track:
+                wandb.log({
+                        "charts/episodic_return": episode_return,
+                        "charts/episode_length": episode_length,
+                        "charts/epsilon": agent.epsilon,
+                        "global_step": t,
+                    },step=t)
     env.close()
-    save_dir = "data_intentional_q_{}_lr{}_gamma{}_lamda{}_eta{}".format(env.spec.id, lr, gamma, lamda, eta_value)
+    save_dir = "data_intentional_q_{}_gamma{}_lamda{}_eta{}".format(env.spec.id, gamma, lamda, eta_value)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     with open(os.path.join(save_dir, "seed_{}.pkl".format(seed)), "wb") as f:
         pickle.dump((returns, term_time_steps, env_name), f)
+    if track:
+        wandb.finish()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Intentional Q(λ)')
     parser.add_argument('--env_name', type=str, default='MinAtar/Breakout-v1')
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--lr', type=float, default=1.0)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--lamda', type=float, default=0.8)
     parser.add_argument('--epsilon_target', type=float, default=0.01)
@@ -132,5 +160,7 @@ if __name__ == '__main__':
     parser.add_argument('--total_steps', type=int, default=5_000_000)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--render', action='store_true')
+    parser.add_argument("--track", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="intentional-updates")
     args = parser.parse_args()
-    main(args.env_name, args.seed, args.lr, args.gamma, args.lamda, args.total_steps, args.epsilon_target, args.epsilon_start, args.exploration_fraction, args.eta_value, args.debug, args.render)
+    main(args.env_name, args.seed, args.gamma, args.lamda, args.total_steps, args.epsilon_target, args.epsilon_start, args.exploration_fraction, args.eta_value, args.debug, args.render, args.track, args.wandb_project)

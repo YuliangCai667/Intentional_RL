@@ -2,6 +2,7 @@ import os, pickle, argparse
 import torch
 import numpy as np
 import torch.nn as nn
+import shimmy
 import gymnasium as gym
 import torch.nn.functional as F
 from torch.distributions import Normal

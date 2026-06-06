@@ -33,14 +33,18 @@ Full results across DM Control, MinAtar, and Atari are in the paper.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
 ## Usage
 
 ```bash
-# Continuous control (MuJoCo / DM Control)
+# Continuous control (MuJoCo)
 python intentional_ac.py --env_name Ant-v4 --seed 0 --debug
+
+# Continuous control (DM Control)
+python intentional_ac.py --env_name dm_control/cheetah-run-v0 --seed 0 --debug
 
 # MinAtar
 python intentional_q_minatar.py --env_name MinAtar/Breakout-v1 --seed 0 --debug

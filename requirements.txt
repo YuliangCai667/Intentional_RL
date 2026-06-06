@@ -1,5 +1,5 @@
-# Reproducible RL environment for Python 3.11
-# Linux x86_64  or Apple Silicon macOS 13+
+# Python 3.11
+# Linux x86_64  or  Apple Silicon macOS 13+
 #
 # Do not compile MuJoCo from source.
 --index-url https://pypi.org/simple

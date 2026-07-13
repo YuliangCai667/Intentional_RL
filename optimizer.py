@@ -1,5 +1,13 @@
 import torch, math
 
+def _tensor_has_nan(tensor):
+    return torch.isnan(tensor).any().item()
+
+
+def _tensor_has_inf(tensor):
+    return torch.isinf(tensor).any().item()
+
+
 class IntentionalOptimizer(torch.optim.Optimizer):
     """
     Unified intentional-update optimizer for both policy and value networks.
@@ -76,12 +84,31 @@ class IntentionalOptimizer(torch.optim.Optimizer):
 
     def step(self, delta, reset=False):
         self.t_step += 1
+        stats = {
+            "delta_raw": float(delta),
+            "has_nan": not math.isfinite(float(delta)) and math.isnan(float(delta)),
+            "has_inf": not math.isfinite(float(delta)) and math.isinf(float(delta)),
+        }
 
         # 1) Entrywise RMSProp stats and norm_grad
         norm_grad = 0.0
+        grad_l2_sq = 0.0
+        param_l2_sq_before = 0.0
         for group in self.param_groups:
             for p in group["params"]:
+                param_l2_sq_before += p.data.detach().float().square().sum().item()
+                if _tensor_has_nan(p.data):
+                    stats["has_nan"] = True
+                if _tensor_has_inf(p.data):
+                    stats["has_inf"] = True
+                if p.grad is None:
+                    continue
                 state = self.state[p]
+                grad_l2_sq += p.grad.detach().float().square().sum().item()
+                if _tensor_has_nan(p.grad):
+                    stats["has_nan"] = True
+                if _tensor_has_inf(p.grad):
+                    stats["has_inf"] = True
                 if self.use_rmsprop:
                     if len(state) == 0:
                         state["entrywise_squared_grad"] = torch.zeros_like(p.data)
@@ -97,13 +124,21 @@ class IntentionalOptimizer(torch.optim.Optimizer):
 
         # 2) Eligibility traces and z_sum
         z_sum = 0.0
+        eligibility_trace_l2_sq = 0.0
         for group in self.param_groups:
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 state = self.state[p]
                 if "eligibility_trace" not in state:
                     state["eligibility_trace"] = torch.zeros_like(p.data)
                 e = state["eligibility_trace"]
                 e.mul_(self.gamma * self.lamda).add_(p.grad, alpha=1.0)
+                eligibility_trace_l2_sq += e.detach().float().square().sum().item()
+                if _tensor_has_nan(e) or _tensor_has_nan(state["rmsprop_v_hat"]):
+                    stats["has_nan"] = True
+                if _tensor_has_inf(e) or _tensor_has_inf(state["rmsprop_v_hat"]):
+                    stats["has_inf"] = True
                 if self.use_rmsprop:
                     z_sum += (e.square() / state["rmsprop_v_hat"]).sum().item()
                 else:
@@ -125,15 +160,40 @@ class IntentionalOptimizer(torch.optim.Optimizer):
         self.safe_delta = self._process_delta(delta)
 
         # 5) Apply update
+        update_l2_sq = 0.0
         for group in self.param_groups:
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 state = self.state[p]
                 e = state["eligibility_trace"]
                 
-                p.data.add_(e / state["rmsprop_v_hat"], alpha=self.safe_delta * step_size)
+                update_direction = e / state["rmsprop_v_hat"]
+                update_alpha = self.safe_delta * step_size
+                update_l2_sq += update_direction.detach().float().square().sum().item() * (update_alpha ** 2)
+                p.data.add_(update_direction, alpha=update_alpha)
+                if _tensor_has_nan(p.data):
+                    stats["has_nan"] = True
+                if _tensor_has_inf(p.data):
+                    stats["has_inf"] = True
                 
                 if reset:
                     e.zero_()
+
+        stats.update({
+            "delta_processed": float(self.safe_delta),
+            "grad_norm": math.sqrt(max(grad_l2_sq, 0.0)),
+            "rmsprop_grad_norm": math.sqrt(max(norm_grad, 0.0)),
+            "eligibility_trace_norm": math.sqrt(max(eligibility_trace_l2_sq, 0.0)),
+            "rmsprop_trace_norm": math.sqrt(max(z_sum, 0.0)),
+            "step_size": float(step_size),
+            "update_norm": math.sqrt(max(update_l2_sq, 0.0)),
+            "param_norm": math.sqrt(max(param_l2_sq_before, 0.0)),
+            "sigma": float(self.sigma),
+        })
+        stats["has_nan"] = bool(stats["has_nan"] or any(math.isnan(v) for v in stats.values() if isinstance(v, float)))
+        stats["has_inf"] = bool(stats["has_inf"] or any(math.isinf(v) for v in stats.values() if isinstance(v, float)))
+        return stats
 
 
 def IntentionalOptimizerPolicy(params, gamma=0.99, lamda=0.0, eta=0.05, beta2=0.999,

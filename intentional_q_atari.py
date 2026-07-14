@@ -16,7 +16,18 @@ from stable_baselines3.common.atari_wrappers import (
 import torch.nn.functional as F
 from normalization_wrappers import NormalizeObservation, ScaleReward
 from sparse_init import sparse_init
+from metrics_logger import MetricsLogger, has_nonfinite_value
 torch.set_default_dtype(torch.float64)
+
+def _tensor_has_nan(tensor):
+    if not torch.is_tensor(tensor) or not tensor.is_floating_point():
+        return False
+    return torch.isnan(tensor).any().item()
+
+def _tensor_has_inf(tensor):
+    if not torch.is_tensor(tensor) or not tensor.is_floating_point():
+        return False
+    return torch.isinf(tensor).any().item()
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
@@ -92,16 +103,34 @@ class IntentionalQ(nn.Module):
                                          torch.tensor(np.array(r)), torch.tensor(np.array(s_prime), dtype=torch.float64), \
                                          torch.tensor(np.array(done_mask), dtype=torch.float64)
         
-        q_sa = self.q(s)[a]
-        max_q_s_prime_a_prime = torch.max(self.q(s_prime), dim=-1).values
+        q_values = self.q(s)
+        next_q_values = self.q(s_prime)
+        q_sa = q_values[a]
+        max_q_s_prime_a_prime = torch.max(next_q_values, dim=-1).values
         td_target = r + self.gamma * max_q_s_prime_a_prime * done_mask
         delta = td_target - q_sa
 
         self.optimizer.zero_grad()
         q_sa.backward()
-        self.optimizer.step(delta.item(), reset=(done or is_nongreedy))
+        optimizer_stats = self.optimizer.step(delta.item(), reset=(done or is_nongreedy))
+        stats = {
+            "td_error": delta.item(),
+            "q_sa": q_sa.item(),
+            "q_mean": q_values.detach().float().mean().item(),
+            "q_max": q_values.detach().float().max().item(),
+            "max_next_q": max_q_s_prime_a_prime.item(),
+            "td_target": td_target.item(),
+            "epsilon": self.epsilon,
+            "is_nongreedy": bool(is_nongreedy),
+            "has_nan": any(_tensor_has_nan(x) for x in (s, r, s_prime, done_mask, q_values, next_q_values, q_sa, max_q_s_prime_a_prime, td_target, delta)),
+            "has_inf": any(_tensor_has_inf(x) for x in (s, r, s_prime, done_mask, q_values, next_q_values, q_sa, max_q_s_prime_a_prime, td_target, delta)),
+        }
+        stats.update(optimizer_stats)
+        stats["has_nan"] = bool(stats["has_nan"] or optimizer_stats["has_nan"])
+        stats["has_inf"] = bool(stats["has_inf"] or optimizer_stats["has_inf"])
+        return stats
 
-def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_start, exploration_fraction, eta_value, debug, render=False, track=False, wandb_project="intentional-updates"):
+def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_start, exploration_fraction, eta_value, debug, render=False, track=False, wandb_project="intentional-updates", log_metrics=False, log_interval=1000, log_dir="logs", dtype_tag="fp64", stop_on_nonfinite=False):
     torch.manual_seed(seed); np.random.seed(seed)
     env = gym.make(env_name, render_mode='human') if render else gym.make(env_name)
     env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -135,13 +164,32 @@ def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_star
         )
     if debug:
         print("seed: {}".format(seed), "env: {}".format(env.spec.id))
+    logger = None
+    if log_metrics:
+        run_name = f"intentional_q_atari_{env.spec.id}_seed{seed}_{dtype_tag}"
+        logger = MetricsLogger(log_dir, run_name)
+        if debug:
+            print("metrics log: {}".format(logger.path))
     returns, term_time_steps = [], []
     s, _ = env.reset(seed=seed)
     episode_num = 1
     for t in range(1, total_steps+1):
         a, is_nongreedy = agent.sample_action(s)
         s_prime, r, terminated, _, info = env.step(a)
-        agent.update_params(s, a, r, s_prime, terminated, is_nongreedy)
+        step_metrics = agent.update_params(s, a, r, s_prime, terminated, is_nongreedy)
+        if logger and (t % log_interval == 0 or has_nonfinite_value(step_metrics)):
+            logger.log({
+                "event": "step",
+                "global_step": t,
+                "env_name": env.spec.id,
+                "seed": seed,
+                "dtype_tag": dtype_tag,
+                **step_metrics,
+            })
+        if stop_on_nonfinite and has_nonfinite_value(step_metrics):
+            if debug:
+                print("Stopping on non-finite metric at step {}".format(t))
+            break
         s = s_prime
         if info and "episode" in info:
             episode_return = info["episode"]["r"]
@@ -152,6 +200,17 @@ def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_star
             term_time_steps.append(t)
             s, _ = env.reset()
             episode_num += 1
+            if logger:
+                logger.log({
+                    "event": "episode",
+                    "global_step": t,
+                    "env_name": env.spec.id,
+                    "seed": seed,
+                    "dtype_tag": dtype_tag,
+                    "episodic_return": episode_return,
+                    "episode_length": episode_length,
+                    "epsilon": agent.epsilon,
+                })
             if track:
                 wandb.log({
                         "charts/episodic_return": episode_return,
@@ -167,6 +226,8 @@ def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_star
         pickle.dump((returns, term_time_steps, env_name), f)
     if track:
         wandb.finish()
+    if logger:
+        logger.close()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Intentional Q(λ)')
@@ -183,5 +244,10 @@ if __name__ == '__main__':
     parser.add_argument('--render', action='store_true')
     parser.add_argument("--track", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="intentional-updates")
+    parser.add_argument("--log_metrics", action="store_true", help="Write step and episode diagnostics to JSONL")
+    parser.add_argument("--log_interval", type=int, default=1000)
+    parser.add_argument("--log_dir", type=str, default="logs")
+    parser.add_argument("--dtype_tag", type=str, default="fp64")
+    parser.add_argument("--stop_on_nonfinite", action="store_true")
     args = parser.parse_args()
-    main(args.env_name, args.seed, args.gamma, args.lamda, args.total_steps, args.epsilon_target, args.epsilon_start, args.exploration_fraction, args.eta_value, args.debug, args.render, args.track, args.wandb_project)
+    main(args.env_name, args.seed, args.gamma, args.lamda, args.total_steps, args.epsilon_target, args.epsilon_start, args.exploration_fraction, args.eta_value, args.debug, args.render, args.track, args.wandb_project, args.log_metrics, args.log_interval, args.log_dir, args.dtype_tag, args.stop_on_nonfinite)

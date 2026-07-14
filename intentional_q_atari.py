@@ -2,7 +2,14 @@ import os, pickle, argparse
 import torch
 import numpy as np
 import torch.nn as nn
-import ale_py
+try:
+    import ale_py
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "Atari training requires ale-py. Install the project Atari dependencies with "
+        "`python -m pip install -r requirements.txt`, or install only the missing backend "
+        "with `python -m pip install ale-py`."
+    ) from exc
 
 import gymnasium as gym
 gym.register_envs(ale_py)

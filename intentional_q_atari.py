@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from normalization_wrappers import NormalizeObservation, ScaleReward
 from sparse_init import sparse_init
 from metrics_logger import MetricsLogger, has_nonfinite_value
-torch.set_default_dtype(torch.float64)
+from precision_utils import DTYPE_CHOICES, DEVICE_CHOICES, default_dtype_tag, resolve_device, resolve_dtype
 
 def _tensor_has_nan(tensor):
     if not torch.is_tensor(tensor) or not tensor.is_floating_point():
@@ -54,8 +54,10 @@ def initialize_weights(m):
         m.bias.data.fill_(0.0)
 
 class IntentionalQ(nn.Module):
-    def __init__(self, n_actions=3, hidden_size=256, epsilon_target=0.01, epsilon_start=1.0, exploration_fraction=0.1, total_steps=1_000_000, gamma=0.99, lamda=0.8, eta_value=0.5):
+    def __init__(self, n_actions=3, hidden_size=256, epsilon_target=0.01, epsilon_start=1.0, exploration_fraction=0.1, total_steps=1_000_000, gamma=0.99, lamda=0.8, eta_value=0.5, dtype=torch.float64, device=torch.device("cpu")):
         super(IntentionalQ, self).__init__()
+        self.dtype = dtype
+        self.device = torch.device(device)
         self.n_actions = n_actions
         self.gamma = gamma
         self.epsilon_start = epsilon_start
@@ -81,17 +83,21 @@ class IntentionalQ(nn.Module):
             nn.Linear(hidden_size, n_actions)
         )
         self.apply(initialize_weights)
+        self.to(device=self.device, dtype=self.dtype)
         self.optimizer = Optimizer(list(self.parameters()), gamma=gamma, lamda=lamda, eta=eta_value)
 
     def q(self, x):
-        x = torch.tensor(np.array(x), dtype=torch.float64)
+        if torch.is_tensor(x):
+            x = x.to(device=self.device, dtype=self.dtype)
+        else:
+            x = torch.tensor(np.array(x), dtype=self.dtype, device=self.device)
         return self.network(x)
 
     def sample_action(self, s):
         self.time_step += 1
         self.epsilon = linear_schedule(self.epsilon_start, self.epsilon_target, self.exploration_fraction * self.total_steps, self.time_step)
         if isinstance(s, np.ndarray):
-            s = torch.tensor(np.array(s), dtype=torch.float64)
+            s = torch.tensor(np.array(s), dtype=self.dtype, device=self.device)
         if np.random.rand() < self.epsilon:
             q_values = self.q(s)
             greedy_action = torch.argmax(q_values, dim=-1).item()
@@ -106,9 +112,9 @@ class IntentionalQ(nn.Module):
 
     def update_params(self, s, a, r, s_prime, done, is_nongreedy):
         done_mask = 0 if done else 1
-        s, a, r, s_prime, done_mask = torch.tensor(np.array(s), dtype=torch.float64), torch.tensor([a], dtype=torch.int).squeeze(0), \
-                                         torch.tensor(np.array(r)), torch.tensor(np.array(s_prime), dtype=torch.float64), \
-                                         torch.tensor(np.array(done_mask), dtype=torch.float64)
+        s, a, r, s_prime, done_mask = torch.tensor(np.array(s), dtype=self.dtype, device=self.device), torch.tensor([a], dtype=torch.int, device=self.device).squeeze(0), \
+                                         torch.tensor(np.array(r), dtype=self.dtype, device=self.device), torch.tensor(np.array(s_prime), dtype=self.dtype, device=self.device), \
+                                         torch.tensor(np.array(done_mask), dtype=self.dtype, device=self.device)
         
         q_values = self.q(s)
         next_q_values = self.q(s_prime)
@@ -137,8 +143,11 @@ class IntentionalQ(nn.Module):
         stats["has_inf"] = bool(stats["has_inf"] or optimizer_stats["has_inf"])
         return stats
 
-def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_start, exploration_fraction, eta_value, debug, render=False, track=False, wandb_project="intentional-updates", log_metrics=False, log_interval=1000, log_dir="logs", dtype_tag="fp64", stop_on_nonfinite=False):
+def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_start, exploration_fraction, eta_value, debug, render=False, track=False, wandb_project="intentional-updates", log_metrics=False, log_interval=1000, log_dir="logs", dtype_name="fp64", device_name="auto", dtype_tag=None, stop_on_nonfinite=False):
     torch.manual_seed(seed); np.random.seed(seed)
+    dtype = resolve_dtype(dtype_name)
+    device = resolve_device(device_name)
+    dtype_tag = default_dtype_tag(dtype_name, dtype_tag)
     env = gym.make(env_name, render_mode='human') if render else gym.make(env_name)
     env = gym.wrappers.RecordEpisodeStatistics(env)
     env = NoopResetEnv(env, noop_max=30)
@@ -151,7 +160,7 @@ def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_star
     env = gym.wrappers.FrameStackObservation(env, 4)
     env = NormalizeObservation(env)
     env = ScaleReward(env, gamma=gamma)
-    agent = IntentionalQ(n_actions=env.action_space.n, gamma=gamma, lamda=lamda, epsilon_target=epsilon_target, epsilon_start=epsilon_start, exploration_fraction=exploration_fraction, total_steps=total_steps, eta_value=eta_value)
+    agent = IntentionalQ(n_actions=env.action_space.n, gamma=gamma, lamda=lamda, epsilon_target=epsilon_target, epsilon_start=epsilon_start, exploration_fraction=exploration_fraction, total_steps=total_steps, eta_value=eta_value, dtype=dtype, device=device)
     if track:
         import wandb
         wandb.init(
@@ -166,14 +175,17 @@ def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_star
                 "epsilon_target": epsilon_target,
                 "epsilon_start": epsilon_start,
                 "exploration_fraction": exploration_fraction,
+                "dtype": dtype_name,
+                "device": str(device),
             },
             name=f"{env_name}-seed{seed}",
         )
     if debug:
-        print("seed: {}".format(seed), "env: {}".format(env.spec.id))
+        print("seed: {}".format(seed), "env: {}".format(env.spec.id), "dtype: {}".format(dtype_name), "device: {}".format(device))
     logger = None
     if log_metrics:
-        run_name = f"intentional_q_atari_{env.spec.id}_seed{seed}_{dtype_tag}"
+        device_tag = str(device).replace(":", "-")
+        run_name = f"intentional_q_atari_{env.spec.id}_seed{seed}_{dtype_tag}_{device_tag}"
         logger = MetricsLogger(log_dir, run_name)
         if debug:
             print("metrics log: {}".format(logger.path))
@@ -190,6 +202,8 @@ def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_star
                 "global_step": t,
                 "env_name": env.spec.id,
                 "seed": seed,
+                "dtype": dtype_name,
+                "device": str(device),
                 "dtype_tag": dtype_tag,
                 **step_metrics,
             })
@@ -213,6 +227,8 @@ def main(env_name, seed, gamma, lamda, total_steps, epsilon_target, epsilon_star
                     "global_step": t,
                     "env_name": env.spec.id,
                     "seed": seed,
+                    "dtype": dtype_name,
+                    "device": str(device),
                     "dtype_tag": dtype_tag,
                     "episodic_return": episode_return,
                     "episode_length": episode_length,
@@ -254,7 +270,9 @@ if __name__ == '__main__':
     parser.add_argument("--log_metrics", action="store_true", help="Write step and episode diagnostics to JSONL")
     parser.add_argument("--log_interval", type=int, default=1000)
     parser.add_argument("--log_dir", type=str, default="logs")
-    parser.add_argument("--dtype_tag", type=str, default="fp64")
+    parser.add_argument("--dtype", choices=DTYPE_CHOICES, default="fp64")
+    parser.add_argument("--device", choices=DEVICE_CHOICES, default="auto")
+    parser.add_argument("--dtype_tag", type=str, default=None)
     parser.add_argument("--stop_on_nonfinite", action="store_true")
     args = parser.parse_args()
-    main(args.env_name, args.seed, args.gamma, args.lamda, args.total_steps, args.epsilon_target, args.epsilon_start, args.exploration_fraction, args.eta_value, args.debug, args.render, args.track, args.wandb_project, args.log_metrics, args.log_interval, args.log_dir, args.dtype_tag, args.stop_on_nonfinite)
+    main(args.env_name, args.seed, args.gamma, args.lamda, args.total_steps, args.epsilon_target, args.epsilon_start, args.exploration_fraction, args.eta_value, args.debug, args.render, args.track, args.wandb_project, args.log_metrics, args.log_interval, args.log_dir, args.dtype, args.device, args.dtype_tag, args.stop_on_nonfinite)
